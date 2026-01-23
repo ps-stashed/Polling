@@ -70,6 +70,7 @@ export default function CreatePoll({
   }, [initialOpen, isControlled]);
 
   const [view, setView] = useState("main"); // 'main' | 'imageInput' | 'linkInput'
+  const [imageTab, setImageTab] = useState("link"); // 'link' | 'upload'
 
   // Data State
   const [productName, setProductName] = useState("");
@@ -85,6 +86,7 @@ export default function CreatePoll({
 
   // Submission State
   const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [success, setSuccess] = useState(false);
 
   // --- Reset ---
@@ -99,6 +101,8 @@ export default function CreatePoll({
     setSubViewError("");
     setSuccess(false);
     setSubmitting(false);
+    setUploading(false);
+    setImageTab("link");
   };
 
   const handleClose = () => {
@@ -137,6 +141,59 @@ export default function CreatePoll({
       setView("main");
     } else {
       setSubViewError("Invalid image URL. Please check the link.");
+    }
+  };
+
+  const handleFileUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    // Basic validation
+    if (!file.type.startsWith("image/")) {
+      setSubViewError("Please upload an image file (JPG, PNG, etc).");
+      return;
+    }
+    // 10MB limit (ImgBB limit is higher but 5-10MB is reasonable)
+    if (file.size > 10 * 1024 * 1024) {
+      setSubViewError("File too large. Please upload an image under 10MB.");
+      return;
+    }
+
+    setSubViewError("");
+    setUploading(true);
+
+    try {
+      const formData = new FormData();
+      formData.append("image", file);
+      // NOTE: Using environment variable for security
+      // Ensure .env.local exists with NEXT_PUBLIC_IMGBB_API_KEY=...
+      const API_KEY = process.env.NEXT_PUBLIC_IMGBB_API_KEY; // Loaded from .env.local
+
+      if (!API_KEY) {
+        throw new Error("Configuration error: Missing ImgBB API Key");
+      }
+
+      const res = await fetch(`https://api.imgbb.com/1/upload?key=${API_KEY}`, {
+        method: "POST",
+        body: formData,
+      });
+
+      const data = await res.json();
+
+      if (data.success) {
+        setImageUrl(data.data.url);
+        setMainError("");
+        setView("main");
+      } else {
+        throw new Error(data.error?.message || "Upload failed");
+      }
+
+    } catch (err) {
+      console.error("Upload error:", err);
+      setSubViewError("Failed to upload image. Reason: " + (err.message || "Unknown error"));
+    } finally {
+      setUploading(false);
+      e.target.value = null;
     }
   };
 
@@ -409,30 +466,76 @@ export default function CreatePoll({
               transition={{ duration: 0.2 }}
               className="p-6 flex flex-col h-full bg-slate-50"
             >
-              <h3 className="text-center font-bold text-slate-800 mb-6 text-lg">Product Image</h3>
+              <h3 className="text-center font-bold text-slate-800 mb-4 text-lg">Product Image</h3>
 
-              <div className="bg-white rounded-xl p-3 shadow-sm flex items-center mb-4 border border-slate-200">
-                {/* Explicitly styled input to avoid dark mode issues */}
-                <input
-                  value={tempInput}
-                  onChange={(e) => setTempInput(e.target.value)}
-                  placeholder="https://..."
-                  className="w-full outline-none text-sm"
-                  style={forcedWhiteInputStyle}
-                  autoFocus
-                />
+              {/* Toggle Tabs */}
+              <div className="flex p-1 bg-slate-200 rounded-xl mb-4">
+                <button
+                  onClick={() => { setImageTab("link"); setSubViewError(""); }}
+                  className={`flex-1 py-1.5 rounded-lg text-sm font-semibold transition-all ${imageTab === "link" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  Link
+                </button>
+                <button
+                  onClick={() => { setImageTab("upload"); setSubViewError(""); }}
+                  className={`flex-1 py-1.5 rounded-lg text-sm font-semibold transition-all ${imageTab === "upload" ? "bg-white text-slate-800 shadow-sm" : "text-slate-500 hover:text-slate-700"}`}
+                >
+                  Upload
+                </button>
               </div>
 
-              <div className="flex gap-4 h-40 mb-4">
-                {/* Preview Box */}
-                <div className="flex-1 bg-gray-200 rounded-xl overflow-hidden flex items-center justify-center relative border border-gray-300">
-                  {tempInput ? (
-                    <img src={tempInput} alt="Preview" className="w-full h-full object-cover" onError={(e) => e.target.style.display = 'none'} />
+              {imageTab === "link" ? (
+                <>
+                  <div className="bg-white rounded-xl p-3 shadow-sm flex items-center mb-4 border border-slate-200">
+                    <input
+                      value={tempInput}
+                      onChange={(e) => setTempInput(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full outline-none text-sm"
+                      style={forcedWhiteInputStyle}
+                      autoFocus
+                    />
+                  </div>
+
+                  <div className="flex gap-4 h-40 mb-4">
+                    <div className="flex-1 bg-gray-200 rounded-xl overflow-hidden flex items-center justify-center relative border border-gray-300">
+                      {tempInput ? (
+                        <img src={tempInput} alt="Preview" className="w-full h-full object-cover" onError={(e) => e.target.style.display = 'none'} />
+                      ) : (
+                        <span className="text-gray-400 text-sm">Preview</span>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="flex-1 flex flex-col items-center justify-center bg-white rounded-xl border-2 border-dashed border-slate-300 p-6 mb-4 hover:border-blue-400 transition-colors cursor-pointer relative">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFileUpload}
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                    disabled={uploading}
+                  />
+                  {uploading ? (
+                    <div className="flex flex-col items-center">
+                      <div className="w-8 h-8 relative mb-2">
+                        <div className="w-8 h-8 rounded-full border-4 border-slate-200 border-t-blue-500 animate-spin"></div>
+                      </div>
+                      <span className="text-sm font-medium text-slate-500">Uploading...</span>
+                    </div>
                   ) : (
-                    <span className="text-gray-400 text-sm">Preview</span>
+                    <>
+                      <div className="w-12 h-12 rounded-full bg-blue-50 flex items-center justify-center mb-3">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6 text-blue-500">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                        </svg>
+                      </div>
+                      <span className="text-sm font-medium text-slate-600">Click to Upload Image</span>
+                      <span className="text-xs text-slate-400 mt-1">JPEG, PNG up to 10MB</span>
+                    </>
                   )}
                 </div>
-              </div>
+              )}
 
               {subViewError && <div className="text-red-500 text-sm text-center mb-4">{subViewError}</div>}
 
@@ -440,13 +543,15 @@ export default function CreatePoll({
                 <button onClick={() => setView("main")} className="flex-1 bg-gray-200 text-gray-700 font-semibold py-3 rounded-xl">
                   Back
                 </button>
-                <button
-                  onClick={handleInsertImage}
-                  disabled={isChecking}
-                  className="flex-1 bg-orange-500 text-white font-semibold py-3 rounded-xl shadow-lg shadow-orange-200"
-                >
-                  {isChecking ? "Checking..." : "Insert"}
-                </button>
+                {imageTab === "link" && (
+                  <button
+                    onClick={handleInsertImage}
+                    disabled={isChecking}
+                    className="flex-1 bg-orange-500 text-white font-semibold py-3 rounded-xl shadow-lg shadow-orange-200"
+                  >
+                    {isChecking ? "Checking..." : "Insert"}
+                  </button>
+                )}
               </div>
             </motion.div>
           )}
