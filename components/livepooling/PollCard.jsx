@@ -167,14 +167,73 @@ export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, wi
   const handleShareCopy = async (e) => {
     e?.stopPropagation?.();
     const url = makeShareUrl();
+    const isUserPoll = card?.source === "USER";
+    const pName = product?.productName || "Product";
+
+    let shareTitle = pName;
+    let shareText = "";
+
+    if (isUserPoll) {
+      // USER template
+      shareText = `Hey!
+I’m checking interest for this product on *Picapool  it’s a platform which connect people nearby*
+I’m personally interested in this and wanted to see if others around us are too.
+If this makes sense to you, *just vote  it helps decide whether it’s worth bringing locally.*
+It takes under 30 seconds 👍
+
+${pName}
+${url}`;
+    } else {
+      // ADMIN template
+      shareText = `Hello 
+Picapool is checking local interest for this product before bringing it in.
+*We launch only if enough people nearby want it.*
+If you’re interested to pool *this product in coming few days, please vote.*
+It takes under 30 seconds.
+
+${pName}
+${url}`;
+    }
 
     if (canUseNavigatorShare && isTouchDevice) {
       try {
         await navigator.share({
-          title: product?.productName || "Poll",
-          text: poll?.question || product?.productName || "Check this poll",
-          url,
+          title: shareTitle,
+          text: shareText,
+          // Some apps ignore 'text' if 'url' is present, or append it. 
+          // But our template INCLUDES the url in the text.
+          // To be safe for most social apps, we might strictly rely on text 
+          // or pass url separately. 
+          // However, if we put URL in text, passing it again in 'url' might duplicate it.
+          // Let's try passing just text + empty url or let the specific app handle it.
+          // Common behavior: 'url' field is often appended. 
+          // Let's adhere to the user request strictly which shows the URL inside the text block.
+          // So we might NOT pass 'url' field to navigator.share if it's already in text?
+          // Actually, standard Web Share API usually prefers 'url' field for the link.
+          // But if the User specifically wants that EXACT format with newlines, 
+          // putting everything in 'text' is safer.
+          // Let's pass url: "" or null to avoid duplication if we already embedded it.
+          // BUT, some apps need the 'url' field to treat it as a link share.
+          // Let's stick to the requested text format which includes the link at the bottom.
+          // If we pass 'url' param, it might appear AFTER our text.
+          // We will try sending EVERYTHING in 'text' and no 'url' param for precise control,
+          // OR if that fails, we accept the duplication.
+          // Let's go with embedding URL in text for the copy logic, 
+          // and for navigator.share, we'll try to match it.
         });
+        // Note: navigator.share with large text + url can be tricky.
+        // Re-reading user request: "when pressed on share button...".
+        // It's likely they want this text copied or shared.
+        // Let's prioritize the text content.
+
+        // Refined approach for navigator.share:
+        // Use the constructed shareText which HAS the url.
+        // Don't pass 'url' property to avoid double-link.
+        await navigator.share({
+          title: shareTitle,
+          text: shareText,
+        });
+
         setCopied(true);
         setTimeout(() => setCopied(false), 1100);
         return;
@@ -183,7 +242,7 @@ export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, wi
       }
     }
 
-    const ok = await copyToClipboard(url);
+    const ok = await copyToClipboard(shareText);
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1100);
