@@ -10,13 +10,14 @@ import AllPollsModal from "./AllPollsModal";
 import OtpLoginModal from "./OtpLoginModal";
 import ReasonModal from "./ReasonModal";
 import useVisitorId from "@/hooks/useVisitorId"; // adjust path if needed
+import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 // CreatePoll and FAB may include client-only dynamic styling/ids — import them client-only to avoid hydration mismatches
 const CreatePoll = dynamic(() => import("./CreatePoll"), { ssr: false });
 const FAB = dynamic(() => import("./FAB"), { ssr: false });
 
-const FETCH_POLLS_BASE = "https://test-api.picapool.com/api/Polling/polls";
-const REGISTER_VOTE_URL = "https://test-api.picapool.com/api/Polling/vote";
+const FETCH_POLLS_BASE = `${PICAPOOL_API_BASE}/v1/Polling/polls`;
+const REGISTER_VOTE_URL = `${PICAPOOL_API_BASE}/v1/Polling/vote`;
 const LOCAL_CONTACT_KEY = "picapool_user_contact";
 const SECTION_SCROLL_DELAY_MS = 180;
 
@@ -217,7 +218,11 @@ export default function LivePooling() {
     if (!visitorId) return;
     setLoading(true); setError(null);
     try {
-      const res = await fetch(`${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`, { cache: "no-store" });
+      const token = await getPicapoolToken(visitorId);
+      const res = await fetch(`${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`, {
+        cache: "no-store",
+        headers: token ? { Authorization: token } : undefined,
+      });
       if (!res.ok) throw new Error(`fetch failed ${res.status}`);
       const json = await res.json();
       const normalized = normalizeApiResponse(json);
@@ -349,9 +354,14 @@ export default function LivePooling() {
       const payload = { pollId: pidNum, optionId: optNum, deviceId: visitorId, previousOptionId: previous ? Number(previous) : null };
       if (meta) payload.meta = meta;
       console.log("[LP] sending vote payload:", payload);
+      const token = await getPicapoolToken(visitorId);
       const res = await fetch(REGISTER_VOTE_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "*/*" },
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "*/*",
+          ...(token ? { Authorization: token } : {}),
+        },
         body: JSON.stringify(payload),
       });
       if (!res.ok) {
@@ -653,6 +663,7 @@ export default function LivePooling() {
         open={otpModalOpen}
         onClose={() => { setOtpModalOpen(false); setPendingAction(null); }}
         onLoginSuccess={handleLoginSuccess}
+        visitorId={visitorId}
       />
 
       <ReasonModal
@@ -661,6 +672,7 @@ export default function LivePooling() {
         onSubmit={handleReasonSubmit}
         user={user}
         onLoginSuccess={handleLoginSuccess}
+        visitorId={visitorId}
       />
 
       <AllPollsModal

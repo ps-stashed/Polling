@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 /**
  * Icons - Using SVGs for those not replaced by assets
@@ -19,7 +20,7 @@ const PlusIcon = (props) => (
 );
 
 // Constants
-const CREATE_URL = "https://test-api.picapool.com/api/Polling";
+const CREATE_URL = `${PICAPOOL_API_BASE}/v1/Polling`;
 const RED_RING = "ring-2 ring-red-500 ring-offset-2";
 
 // Helper: Check image URL (Robust version)
@@ -58,7 +59,8 @@ export default function CreatePoll({
   setControlledOpen = undefined,
   isLoggedIn = false,
   requestLogin = () => { },
-  user = null
+  user = null,
+  visitorId = null
 }) {
   const isControlled = typeof controlledOpen !== "undefined" && typeof setControlledOpen === "function";
   const [internalOpen, setInternalOpen] = useState(Boolean(initialOpen));
@@ -265,9 +267,14 @@ export default function CreatePoll({
     };
 
     try {
+      const token = await getPicapoolToken(visitorId);
       const res = await fetch(CREATE_URL, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "Accept": "*/*" },
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "*/*",
+          ...(token ? { Authorization: token } : {}),
+        },
         body: JSON.stringify(payload),
       });
 

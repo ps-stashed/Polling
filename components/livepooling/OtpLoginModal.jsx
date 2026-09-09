@@ -2,13 +2,13 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-
-const API_BASE = "https://api.picapool.com/v2/otp";
+import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 export default function OtpLoginModal({
     open,
     onClose,
-    onLoginSuccess
+    onLoginSuccess,
+    visitorId = null
 }) {
     const [step, setStep] = useState("PHONE"); // PHONE | OTP | NAME
     const [mobile, setMobile] = useState("");
@@ -68,7 +68,16 @@ export default function OtpLoginModal({
 
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}?mobile=${numToSend}`, { method: "POST" });
+            const token = await getPicapoolToken(visitorId);
+            const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/request`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(token ? { Authorization: token } : {}),
+                },
+                body: JSON.stringify({ phone: numToSend, ttl_seconds: 300 }),
+            });
             if (!res.ok) throw new Error("Failed to send OTP");
 
             setStep("OTP");
@@ -94,17 +103,33 @@ export default function OtpLoginModal({
 
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/verify?otp=${otp}&mobile=${numToSend}`);
+            const token = await getPicapoolToken(visitorId);
+            const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/verify`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(token ? { Authorization: token } : {}),
+                },
+                body: JSON.stringify({
+                    code: otp,
+                    device_id: visitorId || "web-visitor",
+                    meta_device_data: {},
+                    phone: numToSend,
+                }),
+            });
             const data = await res.json();
 
             if (data.success) {
-                // Check if we already have a name for this user in local storage or if we need to ask
-                // For now, per requirements, we ALWAYS ask name if we don't have it. 
-                // But since this is a fresh login, let's move to NAME step to be sure, 
-                // OR if the API returned a name (unlikely for this simple OTP API), use it.
-                // The user request says: "if users name and number is not there then do ask"
-                // So we proceed to NAME step.
-                setStep("NAME");
+                // If the backend already has a name on file for this number, log
+                // straight in instead of asking again.
+                if (data.data?.user?.name) {
+                    const finalNum = cleanNum.length === 10 ? "+91 " + cleanNum : cleanNum;
+                    onLoginSuccess({ name: data.data.user.name, number: finalNum });
+                    onClose();
+                } else {
+                    setStep("NAME");
+                }
             } else {
                 setError(data.message || "Invalid OTP");
             }
@@ -125,7 +150,23 @@ export default function OtpLoginModal({
 
         setLoading(true);
         try {
-            await fetch(`${API_BASE}/retry?mobile=${numToSend}`);
+            const token = await getPicapoolToken(visitorId);
+            await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/resend`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(token ? { Authorization: token } : {}),
+                },
+                body: JSON.stringify({
+                    app_version: "1.2.3",
+                    device_id: visitorId || "web-visitor",
+                    fcm_token: "",
+                    phone: numToSend,
+                    platform: "web",
+                    retry_type: "text",
+                }),
+            });
             setResendTimer(30);
             setError("OTP Resent!");
             setTimeout(() => setError(""), 2000); // Clear success message

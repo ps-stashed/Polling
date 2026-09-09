@@ -2,15 +2,15 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-
-const API_BASE = "https://api.picapool.com/v2/otp";
+import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 export default function ReasonModal({
     open,
     onClose,
     onSubmit,
     user, // { name, number } or null
-    onLoginSuccess // (user) => void
+    onLoginSuccess, // (user) => void
+    visitorId = null
 }) {
     const [reason, setReason] = useState("");
     const [error, setError] = useState("");
@@ -71,7 +71,16 @@ export default function ReasonModal({
 
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}?mobile=${numToSend}`, { method: "POST" });
+            const token = await getPicapoolToken(visitorId);
+            const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/request`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(token ? { Authorization: token } : {}),
+                },
+                body: JSON.stringify({ phone: numToSend, ttl_seconds: 300 }),
+            });
             if (!res.ok) throw new Error("Failed to send OTP");
 
             setStep("OTP");
@@ -98,10 +107,25 @@ export default function ReasonModal({
 
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/verify?otp=${otp}&mobile=${numToSend}`);
+            const token = await getPicapoolToken(visitorId);
+            const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/verify`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Accept: "application/json",
+                    ...(token ? { Authorization: token } : {}),
+                },
+                body: JSON.stringify({
+                    code: otp,
+                    device_id: visitorId || "web-visitor",
+                    meta_device_data: {},
+                    phone: numToSend,
+                }),
+            });
             const data = await res.json();
 
             if (data.success) {
+                if (data.data?.user?.name) setName(data.data.user.name);
                 setVerified(true);
                 setStep("DETAILS");
                 setTimeout(() => nameInputRef.current?.focus(), 100);
