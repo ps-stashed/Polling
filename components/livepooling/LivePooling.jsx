@@ -21,6 +21,16 @@ const REGISTER_VOTE_URL = `${PICAPOOL_API_BASE}/v1/Polling/vote`;
 const LOCAL_CONTACT_KEY = "picapool_user_contact";
 const SECTION_SCROLL_DELAY_MS = 180;
 
+// Known regions for the filter dropdown / `?category=<region>` deep link.
+// Keep in sync with admin-frontend's CreatePollModal REGIONS list — add a
+// new campus in both places, no backend change needed (polls.region is a
+// bare nullable TEXT column).
+const REGIONS = [
+  { value: "", label: "All polls" },
+  { value: "LPU", label: "LPU — Lovely Professional University" },
+  { value: "DU", label: "DU — Delhi University" },
+];
+
 function normalizeApiResponse(apiJson) {
   if (!apiJson) return [];
   const data = apiJson.data ?? apiJson;
@@ -55,6 +65,9 @@ export default function LivePooling() {
   const [initialCreateOpen, setInitialCreateOpen] = useState(false);
   const [notFoundPopup, setNotFoundPopup] = useState({ show: false, message: "" });
 
+  // Region filter (LPU / DU / "" = all). Also drivable via `?category=LPU`.
+  const [region, setRegion] = useState("");
+
   const [modalOpen, setModalOpen] = useState(false);
   const [modalSource, setModalSource] = useState("ADMIN");
 
@@ -72,8 +85,10 @@ export default function LivePooling() {
       const qp = new URLSearchParams(window.location.search);
       const pid = qp.get("pollId");
       const create = qp.get("create");
+      const category = qp.get("category");
       if (pid) setInitialPollId(pid);
       if (create === "1" || create === "true") setInitialCreateOpen(true);
+      if (category && REGIONS.some(r => r.value === category)) setRegion(category);
     } catch { }
   }, []);
 
@@ -224,7 +239,8 @@ export default function LivePooling() {
     // content could show.
     getPicapoolToken(visitorId).catch(() => {});
     try {
-      const pollsUrl = `${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`;
+      let pollsUrl = `${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`;
+      if (region) pollsUrl += `&region=${encodeURIComponent(region)}`;
       let res, lastErr;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -254,9 +270,22 @@ export default function LivePooling() {
         }
       }
     } catch (err) { console.error("fetchPolls:", err); setError(err.message || "Failed to load polls"); } finally { setLoading(false); }
-  }, [visitorId, initialPollId, deriveAndSetVotesFromServer, tryCenterWithRetries, showNotFound]);
+  }, [visitorId, initialPollId, region, deriveAndSetVotesFromServer, tryCenterWithRetries, showNotFound]);
 
   useEffect(() => { if (visitorId) fetchPolls(); }, [visitorId, fetchPolls]);
+
+  // Updates the region filter and keeps the URL shareable: picking LPU turns
+  // the current page into a `?category=LPU` link, matching how a poll share
+  // link works for `?pollId=`.
+  const handleRegionChange = useCallback((next) => {
+    setRegion(next);
+    try {
+      const url = new URL(window.location.href);
+      if (next) url.searchParams.set("category", next);
+      else url.searchParams.delete("category");
+      window.history.replaceState({}, "", url);
+    } catch { }
+  }, []);
 
   // Listen for created event from CreatePoll
   useEffect(() => {
@@ -544,6 +573,19 @@ export default function LivePooling() {
   return (
     <div className="container mx-auto px-4 md:px-8 mt-16 pb-28">
       <div className="mb-6"><Hero /></div>
+
+      <div className="mb-6 flex items-center justify-end">
+        <label className="flex items-center gap-2 text-sm">
+          <span className="text-gray-500 font-medium">Region</span>
+          <select
+            value={region}
+            onChange={(e) => handleRegionChange(e.target.value)}
+            className="text-sm px-3 py-1.5 rounded-lg border bg-white shadow-sm hover:shadow-md outline-none"
+          >
+            {REGIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+          </select>
+        </label>
+      </div>
 
       {error && <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 p-3 rounded">{error}</div>}
 
