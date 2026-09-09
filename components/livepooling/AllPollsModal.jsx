@@ -27,6 +27,7 @@ export default function AllPollsModal({
   onVote,
   votedMap = {},
   busyMap = {},
+  region = "",
 }) {
   // keep hooks order stable
   useEffect(() => {
@@ -119,6 +120,7 @@ export default function AllPollsModal({
                         votedMap={votedMap}
                         busyMap={busyMap}
                         width={increasedCardWidth}
+                        region={region}
                       />
                     </div>
                   </div>

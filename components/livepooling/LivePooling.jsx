@@ -631,7 +631,7 @@ export default function LivePooling() {
                     <div id={`poll-${idFor}`} key={makeKey(c)} style={{ minWidth: 320, width: "min(760px, 100%)", flex: "0 0 min(760px, 100%)", paddingRight: 12, scrollSnapAlign: "center" }}>
                       <PollCard card={c} onVote={({ pollId, optionId }) => {
                         submitVote({ pollId, optionId });
-                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} />
+                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} />
                     </div>
                   );
                 })}
@@ -674,7 +674,7 @@ export default function LivePooling() {
                     <div id={`poll-${idFor}`} key={makeKey(c)} style={{ minWidth: 320, width: "min(760px, 100%)", flex: "0 0 min(760px, 100%)", paddingRight: 12, scrollSnapAlign: "center" }}>
                       <PollCard card={c} onVote={({ pollId, optionId }) => {
                         submitVote({ pollId, optionId });
-                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} />
+                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} />
                     </div>
                   );
                 })}
@@ -738,6 +738,7 @@ export default function LivePooling() {
         onVote={({ pollId, optionId }) => { submitVote({ pollId, optionId }); }}
         votedMap={localVotes}
         busyMap={busyMap}
+        region={region}
       />
 
       {/* Global FAB — merges to the inline create button */}

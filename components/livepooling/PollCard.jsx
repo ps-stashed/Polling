@@ -12,7 +12,7 @@ import ProgressBar from "./ProgressBar";
  * - width: number (optional)
  */
 
-export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, width = 760 }) {
+export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, width = 760, region = "" }) {
   const { product = {}, poll = {} } = card || {};
   const pollIdStr = String(poll?.id ?? poll?.pollId ?? card?._metaIndex ?? "");
   const userVote = votedMap?.[pollIdStr] ?? poll?.isVoted ?? poll?.isvoted ?? null;
@@ -149,11 +149,12 @@ export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, wi
   };
 
   const makeShareUrl = () => {
+    const suffix = region ? `&category=${encodeURIComponent(region)}` : "";
     try {
       const origin = typeof location !== "undefined" ? location.origin || "" : "";
-      return `${origin}/polling/?pollId=${encodeURIComponent(String(pollIdStr))}`;
+      return `${origin}/polling/?pollId=${encodeURIComponent(String(pollIdStr))}${suffix}`;
     } catch {
-      return `/polling/?pollId=${encodeURIComponent(String(pollIdStr))}`;
+      return `/polling/?pollId=${encodeURIComponent(String(pollIdStr))}${suffix}`;
     }
   };
 
