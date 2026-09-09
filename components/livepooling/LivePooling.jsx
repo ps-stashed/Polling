@@ -217,13 +217,26 @@ export default function LivePooling() {
   const fetchPolls = useCallback(async () => {
     if (!visitorId) return;
     setLoading(true); setError(null);
+    // Warm the guest token in the background for later vote/create calls,
+    // but don't block the poll list on it: /v1/Polling/polls answers fine
+    // unauthenticated (verified directly against the API), so awaiting the
+    // token first was just adding a second serial round-trip before any
+    // content could show.
+    getPicapoolToken(visitorId).catch(() => {});
     try {
-      const token = await getPicapoolToken(visitorId);
-      const res = await fetch(`${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`, {
-        cache: "no-store",
-        headers: token ? { Authorization: token } : undefined,
-      });
-      if (!res.ok) throw new Error(`fetch failed ${res.status}`);
+      const pollsUrl = `${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`;
+      let res, lastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          res = await fetch(pollsUrl, { cache: "no-store" });
+          if (res.ok) { lastErr = null; break; }
+          lastErr = new Error(`fetch failed ${res.status}`);
+        } catch (e) {
+          lastErr = e;
+        }
+        if (attempt < 2) await new Promise(r => setTimeout(r, 300 * (attempt + 1)));
+      }
+      if (lastErr) throw lastErr;
       const json = await res.json();
       const normalized = normalizeApiResponse(json);
       setCards(normalized);
