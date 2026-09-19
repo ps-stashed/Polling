@@ -10,7 +10,7 @@ import AllPollsModal from "./AllPollsModal";
 import OtpLoginModal from "./OtpLoginModal";
 import ReasonModal from "./ReasonModal";
 import useVisitorId from "@/hooks/useVisitorId"; // adjust path if needed
-import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getPicapoolToken, getUserToken, clearUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 // CreatePoll and FAB may include client-only dynamic styling/ids — import them client-only to avoid hydration mismatches
 const CreatePoll = dynamic(() => import("./CreatePoll"), { ssr: false });
@@ -232,19 +232,19 @@ export default function LivePooling() {
   const fetchPolls = useCallback(async () => {
     if (!visitorId) return;
     setLoading(true); setError(null);
-    // Warm the guest token in the background for later vote/create calls,
-    // but don't block the poll list on it: /v1/Polling/polls answers fine
-    // unauthenticated (verified directly against the API), so awaiting the
-    // token first was just adding a second serial round-trip before any
-    // content could show.
-    getPicapoolToken(visitorId).catch(() => {});
     try {
+      // /v1/Polling/polls needs a token (guest is fine) — get it before the
+      // request instead of firing-and-forgetting it in the background.
+      const token = await getPicapoolToken(visitorId);
       let pollsUrl = `${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`;
       if (region) pollsUrl += `&region=${encodeURIComponent(region)}`;
       let res, lastErr;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          res = await fetch(pollsUrl, { cache: "no-store" });
+          res = await fetch(pollsUrl, {
+            cache: "no-store",
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+          });
           if (res.ok) { lastErr = null; break; }
           lastErr = new Error(`fetch failed ${res.status}`);
         } catch (e) {
@@ -396,16 +396,27 @@ export default function LivePooling() {
       const payload = { pollId: pidNum, optionId: optNum, deviceId: visitorId, previousOptionId: previous ? Number(previous) : null };
       if (meta) payload.meta = meta;
       console.log("[LP] sending vote payload:", payload);
-      const token = await getPicapoolToken(visitorId);
+      // Voting now requires a real (non-guest) user session — the guest
+      // token 403s with "guests cannot access this endpoint".
+      const token = await getUserToken();
+      if (!token) {
+        requestLogin({ type: "VOTE", payload: { pollId, optionId, previousOptionId: previous } });
+        throw new Error("Please log in to vote.");
+      }
       const res = await fetch(REGISTER_VOTE_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "*/*",
-          ...(token ? { Authorization: token } : {}),
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(payload),
       });
+      if (res.status === 403) {
+        clearUserToken();
+        requestLogin({ type: "VOTE", payload: { pollId, optionId, previousOptionId: previous } });
+        throw new Error("Your session expired — please log in again to vote.");
+      }
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
         throw new Error(`vote failed ${res.status} ${txt}`);
@@ -435,7 +446,7 @@ export default function LivePooling() {
     } finally {
       setBusyMap(b => ({ ...b, [pollId]: false }));
     }
-  }, [visitorId, cards, localVotes, busyMap, markLocal, saveLocalVotes, fetchPolls]);
+  }, [visitorId, cards, localVotes, busyMap, markLocal, saveLocalVotes, fetchPolls, requestLogin]);
 
   // public wrapper: open contact modal only for first vote; otherwise submit directly
   const submitVote = useCallback(async ({ pollId, optionId, isNewOption = false, customText = null }) => {
@@ -688,8 +699,9 @@ export default function LivePooling() {
         {/* inline anchor for FAB to merge with; also used onClick to open CreatePoll */}
         <button
           ref={inlineCreateRef}
-          onClick={() => {
-            if (!user) {
+          onClick={async () => {
+            const token = await getUserToken();
+            if (!token) {
               requestLogin({ type: "CREATE" });
             } else {
               setCreateOpen(true);
@@ -744,8 +756,9 @@ export default function LivePooling() {
       {/* Global FAB — merges to the inline create button */}
       <FAB
         targetRef={inlineCreateRef}
-        onClick={() => {
-          if (!user) {
+        onClick={async () => {
+          const token = await getUserToken();
+          if (!token) {
             requestLogin({ type: "CREATE" });
           } else {
             setCreateOpen(true);

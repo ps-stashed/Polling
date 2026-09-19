@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getPicapoolToken, getUserToken, saveUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 export default function ReasonModal({
     open,
@@ -23,31 +23,49 @@ export default function ReasonModal({
     const [loading, setLoading] = useState(false);
     const [resendTimer, setResendTimer] = useState(0);
     const [verified, setVerified] = useState(false);
+    const [checkingSession, setCheckingSession] = useState(false);
 
     const inputRef = useRef(null);
     const otpInputRef = useRef(null);
     const nameInputRef = useRef(null);
 
     useEffect(() => {
-        if (open) {
-            setReason("");
-            setError("");
+        if (!open) return;
+        setReason("");
+        setError("");
 
-            if (user) {
+        if (!user) {
+            setStep("PHONE");
+            setVerified(false);
+            setMobile("");
+            setOtp("");
+            setName("");
+            setLoading(false);
+            return;
+        }
+
+        // We have a cached name/number, but that doesn't mean the real
+        // (non-guest) session is still alive — check/refresh it before
+        // trusting this as an already-logged-in vote.
+        setMobile(user.number?.replace("+91 ", "") || "");
+        setName(user.name || "");
+        setVerified(false);
+        setCheckingSession(true);
+        let cancelled = false;
+        (async () => {
+            const token = await getUserToken();
+            if (cancelled) return;
+            setCheckingSession(false);
+            if (token) {
                 setStep("DETAILS");
                 setVerified(true);
-                setMobile(user.number?.replace("+91 ", "") || "");
-                setName(user.name || "");
                 setTimeout(() => inputRef.current?.focus(), 100);
             } else {
+                // session expired and couldn't be refreshed — re-verify the number
                 setStep("PHONE");
-                setVerified(false);
-                setMobile("");
-                setOtp("");
-                setName("");
-                setLoading(false);
             }
-        }
+        })();
+        return () => { cancelled = true; };
     }, [open, user]);
 
     useEffect(() => {
@@ -125,6 +143,7 @@ export default function ReasonModal({
             const data = await res.json();
 
             if (data.success) {
+                if (data.data?.access_token) saveUserToken(data.data);
                 if (data.data?.user?.name) setName(data.data.user.name);
                 setVerified(true);
                 setStep("DETAILS");
@@ -141,7 +160,7 @@ export default function ReasonModal({
     };
 
     const handleSubmit = () => {
-        if (!verified && !user) {
+        if (!verified) {
             setError("Please verify your mobile number first");
             return;
         }
@@ -150,14 +169,12 @@ export default function ReasonModal({
             return;
         }
 
-        let currentUser = user;
-        // If we just logged in/verified, notify parent
-        if (!user && verified) {
-            const cleanNum = mobile.replace(/\D/g, "");
-            const finalNum = cleanNum.length === 10 ? "+91 " + cleanNum : cleanNum;
-            currentUser = { name: name.trim(), number: finalNum };
-            onLoginSuccess(currentUser);
-        }
+        const cleanNum = mobile.replace(/\D/g, "");
+        const finalNum = cleanNum.length === 10 ? "+91 " + cleanNum : cleanNum;
+        // Always sync — covers both a fresh OTP login and a cache refresh
+        // where the cached name/number may have changed server-side.
+        const currentUser = { name: name.trim(), number: finalNum };
+        onLoginSuccess(currentUser);
 
         // Reason is optional now
         onSubmit(reason.trim(), currentUser);
@@ -184,10 +201,13 @@ export default function ReasonModal({
                     </div>
 
                     <div className="space-y-5">
+                        {checkingSession && (
+                            <div className="text-sm text-slate-500 text-center py-2">Checking your session…</div>
+                        )}
                         {/* Identity Section (Number + OTP + Name) */}
                         <div className="space-y-4">
                             {/* Mobile Number */}
-                            {!user && (
+                            {!checkingSession && !verified && (
                                 <div className="space-y-2">
                                     <label className="block text-sm font-medium text-slate-700">Mobile Number</label>
                                     <div className="flex gap-2">
@@ -228,7 +248,7 @@ export default function ReasonModal({
                             )}
 
                             {/* OTP Section - Responsive Fix */}
-                            {!user && step === "OTP" && !verified && (
+                            {!checkingSession && step === "OTP" && !verified && (
                                 <motion.div
                                     initial={{ height: 0, opacity: 0 }}
                                     animate={{ height: "auto", opacity: 1 }}
@@ -268,7 +288,7 @@ export default function ReasonModal({
                             )}
 
                             {/* Name Section - Integrated tightly */}
-                            {(verified || user) && (
+                            {verified && (
                                 <motion.div
                                     initial={{ opacity: 0, y: 5 }}
                                     animate={{ opacity: 1, y: 0 }}
@@ -279,7 +299,6 @@ export default function ReasonModal({
                                         ref={nameInputRef}
                                         value={name}
                                         onChange={(e) => setName(e.target.value)}
-                                        disabled={!!user}
                                         className="w-full border rounded-xl px-4 py-3 bg-slate-50 focus:ring-2 ring-blue-500/20 outline-none text-slate-800 placeholder:text-slate-400 transition-all"
                                         placeholder="Enter your name"
                                     />
@@ -288,7 +307,7 @@ export default function ReasonModal({
                         </div>
 
                         {/* Reason Section */}
-                        {(verified || user) && (
+                        {verified && (
                             <motion.div
                                 initial={{ opacity: 0 }}
                                 animate={{ opacity: 1 }}
@@ -317,7 +336,7 @@ export default function ReasonModal({
 
                         <button
                             onClick={handleSubmit}
-                            disabled={(!verified && !user) || !name.trim()}
+                            disabled={!verified || !name.trim()}
                             className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl transition-all active:scale-[0.98] shadow-lg shadow-blue-600/20"
                         >
                             Submit Vote

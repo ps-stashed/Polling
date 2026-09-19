@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getUserToken, clearUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 /**
  * Icons - Using SVGs for those not replaced by assets
@@ -267,16 +267,30 @@ export default function CreatePoll({
     };
 
     try {
-      const token = await getPicapoolToken(visitorId);
+      // Creating a poll now requires a real (non-guest) user session — the
+      // guest token 403s with "guests cannot access this endpoint".
+      const token = await getUserToken();
+      if (!token) {
+        setSubmitting(false);
+        requestLogin();
+        return;
+      }
       const res = await fetch(CREATE_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "*/*",
-          ...(token ? { Authorization: token } : {}),
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify(payload),
       });
+
+      if (res.status === 403) {
+        clearUserToken();
+        setSubmitting(false);
+        requestLogin();
+        return;
+      }
 
       const text = await res.text().catch(() => "");
       let json = null;

@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPicapoolToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getPicapoolToken, saveUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 
 export default function OtpLoginModal({
     open,
@@ -121,6 +121,10 @@ export default function OtpLoginModal({
             const data = await res.json();
 
             if (data.success) {
+                // Capture the real (non-guest) session so create/vote calls
+                // stop getting 403'd with a guest token.
+                if (data.data?.access_token) saveUserToken(data.data);
+
                 // If the backend already has a name on file for this number, log
                 // straight in instead of asking again.
                 if (data.data?.user?.name) {
