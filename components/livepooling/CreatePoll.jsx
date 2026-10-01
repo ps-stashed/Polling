@@ -3,6 +3,7 @@
 import React, { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { getUserToken, clearUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getTurnstileToken } from "@/lib/turnstile";
 
 /**
  * Icons - Using SVGs for those not replaced by assets
@@ -275,12 +276,19 @@ export default function CreatePoll({
         requestLogin();
         return;
       }
+      let turnstileToken = "";
+      try {
+        turnstileToken = await getTurnstileToken();
+      } catch (e) {
+        console.warn("[LP] turnstile token unavailable for create poll", e);
+      }
       const res = await fetch(CREATE_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "*/*",
           Authorization: `Bearer ${token}`,
+          ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
         },
         body: JSON.stringify(payload),
       });

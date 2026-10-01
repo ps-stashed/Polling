@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { getPicapoolToken, getUserToken, saveUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getTurnstileToken } from "@/lib/turnstile";
 
 export default function ReasonModal({
     open,
@@ -90,12 +91,19 @@ export default function ReasonModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
+            let turnstileToken = "";
+            try {
+                turnstileToken = await getTurnstileToken();
+            } catch (e) {
+                console.warn("[LP] turnstile token unavailable for otp request", e);
+            }
             const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/request`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
+                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({ phone: numToSend, ttl_seconds: 300 }),
             });
@@ -126,12 +134,19 @@ export default function ReasonModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
+            let turnstileToken = "";
+            try {
+                turnstileToken = await getTurnstileToken();
+            } catch (e) {
+                console.warn("[LP] turnstile token unavailable for otp verify", e);
+            }
             const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/verify`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
+                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({
                     code: otp,

@@ -5,12 +5,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import dynamic from "next/dynamic";
 import HorizontalScroller from "./HorizontalScroller";
 import PollCard from "./PollCard";
+import PollCardSkeleton from "./PollCardSkeleton";
 import Hero from "./Hero";
 import AllPollsModal from "./AllPollsModal";
 import OtpLoginModal from "./OtpLoginModal";
 import ReasonModal from "./ReasonModal";
 import useVisitorId from "@/hooks/useVisitorId"; // adjust path if needed
 import { getPicapoolToken, getUserToken, clearUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getTurnstileToken } from "@/lib/turnstile";
 
 // CreatePoll and FAB may include client-only dynamic styling/ids — import them client-only to avoid hydration mismatches
 const CreatePoll = dynamic(() => import("./CreatePoll"), { ssr: false });
@@ -403,12 +405,19 @@ export default function LivePooling() {
         requestLogin({ type: "VOTE", payload: { pollId, optionId, previousOptionId: previous } });
         throw new Error("Please log in to vote.");
       }
+      let turnstileToken = "";
+      try {
+        turnstileToken = await getTurnstileToken();
+      } catch (e) {
+        console.warn("[LP] turnstile token unavailable for vote", e);
+      }
       const res = await fetch(REGISTER_VOTE_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "*/*",
           Authorization: `Bearer ${token}`,
+          ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
         },
         body: JSON.stringify(payload),
       });
@@ -582,21 +591,36 @@ export default function LivePooling() {
   };
 
   return (
-    <div className="container mx-auto px-4 md:px-8 mt-16 pb-28">
-      <div className="mb-6"><Hero /></div>
+    <>
+      {loading && (
+        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[#fbfbfb]">
+          <div className="loading-screen-content flex flex-col items-center">
+            <div className="flex items-end gap-3 mb-6 h-[60px]">
+              <div className="vote-bar orange-gradient" style={{ animationDelay: "0ms" }}></div>
+              <div className="vote-bar orange-gradient" style={{ animationDelay: "200ms", height: "40px" }}></div>
+              <div className="vote-bar orange-gradient" style={{ animationDelay: "400ms", height: "50px" }}></div>
+              <div className="vote-bar orange-gradient" style={{ animationDelay: "600ms" }}></div>
+            </div>
+            <h2 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 mb-2">Picapool</h2>
+            <p className="text-gray-500 text-sm font-medium tracking-wide animate-pulse">Loading live polls...</p>
+          </div>
+        </div>
+      )}
+      <div className={`container mx-auto px-4 md:px-8 mt-16 pb-28 transition-opacity duration-500 ${loading ? "opacity-0 h-0 overflow-hidden" : "opacity-100"}`}>
+        <div className="mb-6"><Hero /></div>
 
-      <div className="mb-6 flex items-center justify-end">
-        <label className="flex items-center gap-2 text-sm">
-          <span className="text-gray-500 font-medium">Region</span>
-          <select
-            value={region}
-            onChange={(e) => handleRegionChange(e.target.value)}
-            className="text-sm px-3 py-1.5 rounded-lg border bg-white shadow-sm hover:shadow-md outline-none"
-          >
-            {REGIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
-          </select>
-        </label>
-      </div>
+        <div className="mb-6 flex items-center justify-end">
+          <label className="flex items-center gap-2 text-sm">
+            <span className="text-gray-500 font-medium">Region</span>
+            <select
+              value={region}
+              onChange={(e) => handleRegionChange(e.target.value)}
+              className="text-sm px-3 py-1.5 rounded-lg border bg-white shadow-sm hover:shadow-md outline-none"
+            >
+              {REGIONS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+            </select>
+          </label>
+        </div>
 
       {error && <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 p-3 rounded">{error}</div>}
 
@@ -620,7 +644,10 @@ export default function LivePooling() {
         </div>
 
         {loading ? (
-          <div className="grid gap-4"><div className="h-44 bg-white rounded-xl shadow animate-pulse" /><div className="h-44 bg-white rounded-xl shadow animate-pulse" /></div>
+          <div className="horizontal-scroller-container no-scrollbar" style={{ display: "flex", gap: 12, overflow: "hidden" }}>
+            <PollCardSkeleton />
+            <PollCardSkeleton />
+          </div>
         ) : (
           <div className="relative">
             <div className="hidden md:flex" style={{ position: "absolute", left: 6, top: "42%", zIndex: 30 }}>
@@ -663,7 +690,9 @@ export default function LivePooling() {
         </div>
 
         {loading ? (
-          <div className="grid gap-4"><div className="h-44 bg-white rounded-xl shadow animate-pulse" /></div>
+          <div className="horizontal-scroller-container no-scrollbar" style={{ display: "flex", gap: 12, overflow: "hidden" }}>
+            <PollCardSkeleton />
+          </div>
         ) : (
           <div className="relative">
             <div className="hidden md:flex" style={{ position: "absolute", left: 6, top: "42%", zIndex: 30 }}>
@@ -791,5 +820,6 @@ export default function LivePooling() {
       `}</style>
 
     </div>
+    </>
   );
 }

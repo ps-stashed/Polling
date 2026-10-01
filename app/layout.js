@@ -1,11 +1,5 @@
 import "./globals.css";
-import { Poppins } from "next/font/google";
 import Script from "next/script";
-
-const poppins = Poppins({
-  subsets: ["latin"],
-  weight: ["400", "500", "600", "700"], // Specify the weights you need
-});
 
 export const metadata = {
   title: "Picapool - Polling Website",
@@ -15,6 +9,11 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="en" suppressHydrationWarning={true}>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+      </head>
       <Script
         strategy="afterInteractive"
         src="https://www.googletagmanager.com/gtag/js?id=G-67R15PX4LC"
@@ -26,7 +25,7 @@ export default function RootLayout({ children }) {
           gtag('config', 'G-67R15PX4LC');`}
       </Script>
       <body
-        className={`${poppins.className} bg-white w-screen text-black overflow-x-hidden`}
+        className="bg-white w-screen text-black overflow-x-hidden"
       >
         {children}
       </body>

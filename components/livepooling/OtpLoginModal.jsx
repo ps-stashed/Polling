@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { getPicapoolToken, saveUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getPicapoolToken, getUserToken, saveUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getTurnstileToken } from "@/lib/turnstile";
 
 export default function OtpLoginModal({
     open,
@@ -69,12 +70,19 @@ export default function OtpLoginModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
+            let turnstileToken = "";
+            try {
+                turnstileToken = await getTurnstileToken();
+            } catch (e) {
+                console.warn("[LP] turnstile token unavailable for otp request", e);
+            }
             const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/request`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
+                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({ phone: numToSend, ttl_seconds: 300 }),
             });
@@ -104,12 +112,19 @@ export default function OtpLoginModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
+            let turnstileToken = "";
+            try {
+                turnstileToken = await getTurnstileToken();
+            } catch (e) {
+                console.warn("[LP] turnstile token unavailable for otp verify", e);
+            }
             const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/verify`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
+                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({
                     code: otp,
@@ -155,12 +170,19 @@ export default function OtpLoginModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
+            let turnstileToken = "";
+            try {
+                turnstileToken = await getTurnstileToken();
+            } catch (e) {
+                console.warn("[LP] turnstile token unavailable for otp resend", e);
+            }
             await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/resend`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
+                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({
                     app_version: "1.2.3",
@@ -181,7 +203,7 @@ export default function OtpLoginModal({
         }
     };
 
-    const handleFinalSubmit = () => {
+    const handleFinalSubmit = async () => {
         if (!name.trim()) {
             setError("Please enter your name");
             return;
@@ -190,6 +212,32 @@ export default function OtpLoginModal({
         const cleanNum = mobile.replace(/\D/g, "");
         let finalNum = cleanNum;
         if (cleanNum.length === 10) finalNum = "+91 " + cleanNum; // Format for display/storage
+
+        setError("");
+        setLoading(true);
+        try {
+            const token = await getUserToken();
+            if (token) {
+                const res = await fetch(`${PICAPOOL_API_BASE}/v1/users/me`, {
+                    method: "PATCH",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Accept: "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({ name: name.trim() }),
+                });
+                if (!res.ok) {
+                    console.warn("[LP] saving name failed, status", res.status);
+                }
+            }
+        } catch (err) {
+            console.warn("[LP] saving name failed", err);
+            // Don't block login over this -- the name still shows locally for
+            // this session even if the profile write failed server-side.
+        } finally {
+            setLoading(false);
+        }
 
         onLoginSuccess({ name: name.trim(), number: finalNum });
         onClose();
@@ -302,10 +350,10 @@ export default function OtpLoginModal({
                                 />
                                 <button
                                     onClick={handleFinalSubmit}
-                                    disabled={!name.trim()}
+                                    disabled={!name.trim() || loading}
                                     className="w-full bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3.5 rounded-xl transition-all active:scale-[0.98]"
                                 >
-                                    Complete
+                                    {loading ? "Saving..." : "Complete"}
                                 </button>
                             </div>
                         )}
