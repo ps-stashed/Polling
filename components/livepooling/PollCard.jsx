@@ -329,7 +329,6 @@ ${url}`;
   // ----- question truncation + fixed desktop height -----
   const MAX_QUESTION_CHARS = 140;
   const CARD_FIXED_HEIGHT = 460; // for desktop
-  const PAID_CARD_MIN_HEIGHT = 520;
 
   let rawQuestion = String(poll?.question ?? "");
 
@@ -423,11 +422,10 @@ ${url}`;
         border: "1px solid rgba(15,23,42,0.06)",
         boxShadow: "0 12px 34px rgba(15,23,42,0.08)",
         position: "relative",
-        // Paid cards carry a fee chip, progress bar and pay/offer panel on top
-        // of the usual content, so they get a taller floor and grow if needed
-        // instead of clipping. Free cards keep the fixed height.
+        // Paid cards carry a fee chip, progress bar and pay/offer panel, so they
+        // size to their content instead of the fixed free-card height.
         ...(isPaid
-          ? { height: "auto", minHeight: PAID_CARD_MIN_HEIGHT, maxHeight: "none", display: "flex" }
+          ? { height: "auto", minHeight: 0, maxHeight: "none" }
           : { height: CARD_FIXED_HEIGHT, minHeight: CARD_FIXED_HEIGHT, maxHeight: CARD_FIXED_HEIGHT }),
         transition: "transform 220ms cubic-bezier(.2,.9,.2,1), box-shadow 220ms ease",
         overflow: "hidden",
@@ -493,8 +491,6 @@ ${url}`;
           display: "flex",
           flexDirection: "row",
           height: "100%",
-          // inside a flex (paid) card the inner row must fill the width
-          ...(isPaid ? { flex: 1, minWidth: 0 } : {}),
         }}
       >
         {/* LEFT: image + product info */}
