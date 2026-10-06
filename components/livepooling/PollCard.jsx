@@ -1,6 +1,7 @@
 "use client";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProgressBar from "./ProgressBar";
+import { formatRupees, getPaidStatus, offerUrl, triggerOptionText } from "@/lib/paidPolls";
 
 /**
  * PollCard
@@ -10,9 +11,13 @@ import ProgressBar from "./ProgressBar";
  * - votedMap: { [pollId]: optionId }
  * - busyMap: { [pollId]: bool }
  * - width: number (optional)
+ * - onPay: function({ pollId }) — opens the entry-fee flow (paid polls only)
+ * - paymentStatus: "checking" | "timeout" | null — set while we wait for the
+ *   payment webhook after returning from the payment page
+ * - onRecheckPayment: function({ pollId })
  */
 
-export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, width = 760, region = "" }) {
+export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, width = 760, region = "", onPay, paymentStatus = null, onRecheckPayment }) {
   const { product = {}, poll = {} } = card || {};
   const pollIdStr = String(poll?.id ?? poll?.pollId ?? card?._metaIndex ?? "");
   const userVote = votedMap?.[pollIdStr] ?? poll?.isVoted ?? poll?.isvoted ?? null;
@@ -21,6 +26,17 @@ export default function PollCard({ card, onVote, votedMap = {}, busyMap = {}, wi
 
   const options = Array.isArray(poll?.options) ? poll.options : [];
   const total = options.reduce((s, o) => s + Number(o.count || 0), 0) || 0;
+
+  // ----- paid-poll state (all "free"/no-op for ordinary polls) -----
+  const paidStatus = getPaidStatus(poll);
+  const isPaid = paidStatus !== "free";
+  const entryFee = Number(poll?.entryFee || 0);
+  const targetVotes = Number(poll?.targetVotes || 0);
+  const paidVotes = Number(poll?.paidVotes || 0);
+  const triggerText = triggerOptionText(poll);
+  // options stay on the card except where they're replaced by a pay / "offer is live" panel
+  const showOptions = paidStatus === "free" || paidStatus === "open" || paidStatus === "closed";
+  const votingLocked = paidStatus === "closed";
 
   // ----- Animated counts state -----
   const [animatedCounts, setAnimatedCounts] = useState(() => {
@@ -296,6 +312,7 @@ ${url}`;
       console.log("[PollCard] click ignored - busy", pollIdStr);
       return;
     }
+    if (votingLocked) return;
     if (String(userVote) === String(optId)) {
       console.log("[PollCard] click ignored - same option as current vote");
       return;
@@ -312,6 +329,7 @@ ${url}`;
   // ----- question truncation + fixed desktop height -----
   const MAX_QUESTION_CHARS = 140;
   const CARD_FIXED_HEIGHT = 460; // for desktop
+  const PAID_CARD_MIN_HEIGHT = 520;
 
   let rawQuestion = String(poll?.question ?? "");
 
@@ -405,9 +423,12 @@ ${url}`;
         border: "1px solid rgba(15,23,42,0.06)",
         boxShadow: "0 12px 34px rgba(15,23,42,0.08)",
         position: "relative",
-        height: CARD_FIXED_HEIGHT,
-        minHeight: CARD_FIXED_HEIGHT,
-        maxHeight: CARD_FIXED_HEIGHT,
+        // Paid cards carry a fee chip, progress bar and pay/offer panel on top
+        // of the usual content, so they get a taller floor and grow if needed
+        // instead of clipping. Free cards keep the fixed height.
+        ...(isPaid
+          ? { height: "auto", minHeight: PAID_CARD_MIN_HEIGHT, maxHeight: "none", display: "flex" }
+          : { height: CARD_FIXED_HEIGHT, minHeight: CARD_FIXED_HEIGHT, maxHeight: CARD_FIXED_HEIGHT }),
         transition: "transform 220ms cubic-bezier(.2,.9,.2,1), box-shadow 220ms ease",
         overflow: "hidden",
       }}
@@ -472,6 +493,8 @@ ${url}`;
           display: "flex",
           flexDirection: "row",
           height: "100%",
+          // inside a flex (paid) card the inner row must fill the width
+          ...(isPaid ? { flex: 1, minWidth: 0 } : {}),
         }}
       >
         {/* LEFT: image + product info */}
@@ -601,6 +624,31 @@ ${url}`;
               {displayQuestion || " "}
             </div>
 
+            {isPaid && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                <span style={chipStyle("#fff7ed", "#c2410c", "#fed7aa")}>Paid poll · {formatRupees(entryFee)} entry</span>
+                {poll?.hasPaidEntry === true && paidStatus !== "launched" && (
+                  <span style={chipStyle("#ecfdf5", "#047857", "#a7f3d0")}>✓ You&apos;re in</span>
+                )}
+                {paidStatus === "closed" && (
+                  <span style={chipStyle("#f3f4f6", "#4b5563", "#e5e7eb")}>Poll closed</span>
+                )}
+              </div>
+            )}
+
+            {paidStatus === "needs-entry" && (
+              <EntryPanel
+                entryFee={entryFee}
+                triggerText={triggerText}
+                paymentStatus={paymentStatus}
+                onPay={() => onPay?.({ pollId: pollIdStr })}
+                onRecheck={() => onRecheckPayment?.({ pollId: pollIdStr })}
+              />
+            )}
+
+            {paidStatus === "launched" && <OfferLivePanel offerId={poll?.offerId} />}
+
+            {showOptions && (
             <div
               className="options-vertical"
               style={{
@@ -612,7 +660,8 @@ ${url}`;
               {options.map((opt) => {
                 const displayed = hasVoted ? animatedCounts[opt.id] ?? 0 : 0;
                 const active = hasVoted && String(userVote) === String(opt.id);
-                const buttonDisabled = Boolean(isBusy) || String(userVote) === String(opt.id);
+                const buttonDisabled = Boolean(isBusy) || votingLocked || String(userVote) === String(opt.id);
+                const countsTowardTarget = isPaid && String(opt.id) === String(poll?.triggerOptionId);
 
                 return (
                   <button
@@ -669,9 +718,16 @@ ${url}`;
                         style={{
                           fontWeight: 600,
                           color: "#0f172a",
+                          display: "flex",
+                          alignItems: "center",
+                          flexWrap: "wrap",
+                          gap: 8,
                         }}
                       >
                         {opt.label ?? opt.text}
+                        {countsTowardTarget && (
+                          <span style={chipStyle("#eef2ff", "#4338ca", "#c7d2fe")}>Counts toward target</span>
+                        )}
                       </div>
 
                       <div style={{ marginTop: 8 }}>
@@ -707,6 +763,11 @@ ${url}`;
               })}
               <div style={{ height: 8 }} />
             </div>
+            )}
+
+            {isPaid && targetVotes > 0 && (
+              <PaidProgress paidVotes={paidVotes} targetVotes={targetVotes} triggerText={triggerText} launched={paidStatus === "launched"} />
+            )}
           </div>
 
           <div
@@ -759,5 +820,130 @@ ${url}`;
         }
       `}</style>
     </article>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Paid-poll pieces
+// ---------------------------------------------------------------------------
+
+function chipStyle(background, color, border) {
+  return {
+    display: "inline-flex",
+    alignItems: "center",
+    padding: "2px 8px",
+    borderRadius: 999,
+    background,
+    color,
+    border: `1px solid ${border}`,
+    fontSize: 11,
+    fontWeight: 600,
+    lineHeight: "16px",
+    whiteSpace: "nowrap",
+  };
+}
+
+const panelStyle = {
+  borderRadius: 10,
+  padding: 14,
+  display: "flex",
+  flexDirection: "column",
+  gap: 10,
+};
+
+const ctaStyle = (disabled) => ({
+  border: "none",
+  borderRadius: 10,
+  padding: "12px 16px",
+  background: disabled ? "#fdba74" : "#ec8422",
+  color: "#fff",
+  fontWeight: 700,
+  fontSize: 15,
+  cursor: disabled ? "default" : "pointer",
+  boxShadow: disabled ? "none" : "0 6px 16px rgba(236,132,34,0.28)",
+  textAlign: "center",
+  textDecoration: "none",
+});
+
+const linkButtonStyle = {
+  border: "none",
+  background: "none",
+  padding: 0,
+  color: "#6b7280",
+  fontSize: 12,
+  textDecoration: "underline",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+/** Shown instead of the options until the caller has paid the entry fee. */
+function EntryPanel({ entryFee, triggerText, paymentStatus, onPay, onRecheck }) {
+  const checking = paymentStatus === "checking";
+  const timedOut = paymentStatus === "timeout";
+
+  return (
+    <div style={{ ...panelStyle, background: "#fffaf5", border: "1px solid #fed7aa" }}>
+      {checking ? (
+        <>
+          <div style={{ fontWeight: 700, color: "#0f172a" }}>Confirming your payment…</div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>
+            This usually takes a few seconds. Please don&apos;t pay again.
+          </div>
+        </>
+      ) : timedOut ? (
+        <>
+          <div style={{ fontWeight: 700, color: "#0f172a" }}>Payment processing — check back shortly</div>
+          <div style={{ fontSize: 13, color: "#6b7280" }}>
+            We haven&apos;t received confirmation yet. If you completed the payment, it can take a few minutes.
+          </div>
+          <button type="button" onClick={onRecheck} style={ctaStyle(false)}>Check again</button>
+          <button type="button" onClick={onPay} style={linkButtonStyle}>Payment didn&apos;t go through? Try again</button>
+        </>
+      ) : (
+        <>
+          <button type="button" onClick={onPay} style={ctaStyle(false)}>
+            Pay {formatRupees(entryFee)} to vote
+          </button>
+          <div style={{ fontSize: 12.5, color: "#6b7280", lineHeight: "18px" }}>
+            One-time, non-refundable entry fee. Pay once, then vote on any option and change it until the poll closes
+            {triggerText ? <> — only paid <b>&ldquo;{triggerText}&rdquo;</b> votes count toward the target</> : null}.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Replaces the options once the target is reached and the offer is live. */
+function OfferLivePanel({ offerId }) {
+  const href = offerUrl(offerId);
+  return (
+    <div style={{ ...panelStyle, background: "#ecfdf5", border: "1px solid #a7f3d0" }}>
+      <div style={{ fontWeight: 700, color: "#047857", fontSize: 16 }}>🎉 Offer is live</div>
+      <div style={{ fontSize: 13, color: "#065f46" }}>The target was reached and the offer is now open.</div>
+      {href && (
+        <a href={href} target="_blank" rel="noreferrer" style={{ ...ctaStyle(false), background: "#059669", boxShadow: "0 6px 16px rgba(5,150,105,0.25)" }}>
+          View the offer →
+        </a>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Progress toward the launch target. Driven by `paidVotes` (paid users
+ * currently on the trigger option), NOT by options[].count, which includes
+ * everyone.
+ */
+function PaidProgress({ paidVotes, targetVotes, triggerText, launched }) {
+  const shown = launched ? targetVotes : Math.min(paidVotes, targetVotes);
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "#4b5563", marginBottom: 6 }}>
+        <span>Paid {triggerText ? <>&ldquo;{triggerText}&rdquo; </> : null}votes needed</span>
+        <span style={{ fontWeight: 700, color: "#0f172a" }}>{paidVotes} / {targetVotes}</span>
+      </div>
+      <ProgressBar value={shown} max={targetVotes} />
+    </div>
   );
 }

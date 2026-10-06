@@ -10,9 +10,19 @@ import Hero from "./Hero";
 import AllPollsModal from "./AllPollsModal";
 import OtpLoginModal from "./OtpLoginModal";
 import ReasonModal from "./ReasonModal";
+import InteractiveLoader from "./InteractiveLoader";
+import PaidEntryModal from "./PaidEntryModal";
 import useVisitorId from "@/hooks/useVisitorId"; // adjust path if needed
-import { getPicapoolToken, getUserToken, clearUserToken, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
+import { getPicapoolToken, getUserToken, clearUserToken, hasStoredUserSession, importAppSession, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
 import { getTurnstileToken } from "@/lib/turnstile";
+import {
+  ENTRY_FEE_REQUIRED,
+  getPaidStatus,
+  isPaidPoll,
+  paidVotesAfterVote,
+  readApiError,
+  startPollEntry,
+} from "@/lib/paidPolls";
 
 // CreatePoll and FAB may include client-only dynamic styling/ids — import them client-only to avoid hydration mismatches
 const CreatePoll = dynamic(() => import("./CreatePoll"), { ssr: false });
@@ -22,6 +32,12 @@ const FETCH_POLLS_BASE = `${PICAPOOL_API_BASE}/v1/Polling/polls`;
 const REGISTER_VOTE_URL = `${PICAPOOL_API_BASE}/v1/Polling/vote`;
 const LOCAL_CONTACT_KEY = "picapool_user_contact";
 const SECTION_SCROLL_DELAY_MS = 180;
+
+// After the payment page sends the buyer back, the backend only unlocks voting
+// once the payment webhook lands, which can lag. Re-read the feed every couple
+// of seconds for about half a minute before giving up politely.
+const PAYMENT_CONFIRM_INTERVAL_MS = 2000;
+const PAYMENT_CONFIRM_WINDOW_MS = 30000;
 
 // Known regions for the filter dropdown / `?category=<region>` deep link.
 // Keep in sync with admin-frontend's CreatePollModal REGIONS list — add a
@@ -81,6 +97,32 @@ export default function LivePooling() {
   const [pendingAction, setPendingAction] = useState(null); // { type: 'VOTE' | 'CREATE', payload: ... }
   const [pendingVote, setPendingVote] = useState(null); // { pollId, optionId, previousOptionId }
 
+  // ---- paid polls ----
+  const [payModal, setPayModal] = useState(null); // { pollId, busy, error } — the "pay ₹X to vote" confirm step
+  const [paymentCheck, setPaymentCheck] = useState(null); // { pollId, status: "checking" | "timeout" } after returning from the payment page
+  const [returnedPaidPollId, setReturnedPaidPollId] = useState(null); // from `?paid=<pollId>`
+  const [returnedPaidStatus, setReturnedPaidStatus] = useState(null); // `status` the payment page appended (hint only)
+  const [notice, setNotice] = useState(null); // { tone: "success" | "info", text }
+  // Opened inside the Picapool app? Adopt its logged-in session before anything
+  // authenticated runs, so the user is never asked to log in again.
+  const [sessionReady, setSessionReady] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    importAppSession()
+      .then((contact) => { if (alive && contact) setUser(contact); })
+      .catch((e) => console.warn("[LP] importAppSession failed", e))
+      .finally(() => { if (alive) setSessionReady(true); });
+    return () => { alive = false; };
+  }, []);
+  const fetchSeqRef = useRef(0); // newest feed request issued
+  const appliedSeqRef = useRef(0); // newest feed response applied (older ones are dropped)
+  const feedAsUserRef = useRef(false); // was the applied feed read with a real (non-guest) token?
+  const fetchPollsRef = useRef(null);
+  const paidReturnHandledRef = useRef(false);
+  const verifyingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const noticeTimerRef = useRef(null);
+
   // capture query params on mount (client-only)
   useEffect(() => {
     try {
@@ -88,6 +130,12 @@ export default function LivePooling() {
       const pid = qp.get("pollId");
       const create = qp.get("create");
       const category = qp.get("category");
+      const paid = qp.get("paid"); // payment page return URL: /?paid=<pollId>
+      if (paid && /^\d+$/.test(paid)) {
+        setReturnedPaidPollId(paid);
+        setReturnedPaidStatus(qp.get("status"));
+        if (!pid) setInitialPollId(paid); // scroll the poll they just paid for into view
+      }
       if (pid) setInitialPollId(pid);
       if (create === "1" || create === "true") setInitialCreateOpen(true);
       if (category && REGIONS.some(r => r.value === category)) setRegion(category);
@@ -117,16 +165,22 @@ export default function LivePooling() {
     try {
       if (!Array.isArray(normalizedCards)) return;
       const byPoll = {};
+      const notVotedPaid = []; // paid polls where the server says this user hasn't voted
       normalizedCards.forEach(c => {
         const pid = String(c.poll?.id ?? c._metaIndex ?? "");
         const serverVoted = c.poll?.isVoted ?? null;
         if (serverVoted != null) byPoll[pid] = serverVoted;
+        // Free polls are tracked per device, so a missing isVoted proves nothing.
+        // Paid polls are resolved per *user*: null means this user hasn't voted,
+        // so drop any leftover local vote (e.g. from someone else on this browser).
+        else if (isPaidPoll(c.poll)) notVotedPaid.push(pid);
       });
-      if (Object.keys(byPoll).length > 0) {
+      if (Object.keys(byPoll).length > 0 || notVotedPaid.length > 0) {
         console.log("[LP] derived votes from server:", byPoll);
         setLocalVotes(prev => {
           const next = { ...(prev || {}) };
           Object.entries(byPoll).forEach(([pid, opt]) => { next[pid] = opt; });
+          notVotedPaid.forEach(pid => { delete next[pid]; });
           try { if (visitorId) localStorage.setItem(`picapool_votes_${visitorId}`, JSON.stringify(next)); } catch (e) { console.warn("[LP] persist votes failed", e); }
           return next;
         });
@@ -138,8 +192,8 @@ export default function LivePooling() {
 
   // load local votes & contact from storage once visitorId ready
   useEffect(() => {
-    if (!visitorId) {
-      console.log("[LP] visitorId not ready yet");
+    if (!visitorId || !sessionReady) {
+      console.log("[LP] visitorId / session not ready yet");
       return;
     }
     console.log("[LP] visitorId ready:", visitorId);
@@ -160,7 +214,7 @@ export default function LivePooling() {
         }
       }
     } catch (e) { console.warn("[LP] error loading user:", e); }
-  }, [visitorId]);
+  }, [visitorId, sessionReady]);
 
   useEffect(() => { if (visitorError) { setError(`Visitor detection: ${visitorError}`); console.error(visitorError); } }, [visitorError]);
 
@@ -231,13 +285,25 @@ export default function LivePooling() {
     return false;
   }, [centerAndHighlight]);
 
-  const fetchPolls = useCallback(async () => {
-    if (!visitorId) return;
-    setLoading(true); setError(null);
+  // `silent` refreshes the feed in place: no full-screen loader, no error
+  // banner, no re-centering on the deep-linked poll. Used after voting, after
+  // login and while waiting for a payment to land. Resolves with the
+  // normalized cards (or null on failure) so callers can inspect fresh data
+  // without waiting for React state.
+  const fetchPolls = useCallback(async ({ silent = false } = {}) => {
+    if (!visitorId) return null;
+    const seq = ++fetchSeqRef.current;
+    if (!silent) { setLoading(true); setError(null); }
     try {
-      // /v1/Polling/polls needs a token (guest is fine) — get it before the
-      // request instead of firing-and-forgetting it in the background.
-      const token = await getPicapoolToken(visitorId);
+      // /v1/Polling/polls needs a token — get it before the request instead
+      // of firing-and-forgetting it in the background. Paid polls resolve
+      // hasPaidEntry / isVoted per *user*, so send the real session whenever
+      // there is one: a guest token always reads as "not paid". Everything
+      // else on this endpoint is fine with a guest token.
+      let token = null;
+      if (hasStoredUserSession()) token = await getUserToken();
+      const asUser = !!token;
+      if (!token) token = await getPicapoolToken(visitorId);
       let pollsUrl = `${FETCH_POLLS_BASE}?deviceId=${encodeURIComponent(visitorId)}`;
       if (region) pollsUrl += `&region=${encodeURIComponent(region)}`;
       let res, lastErr;
@@ -257,12 +323,17 @@ export default function LivePooling() {
       if (lastErr) throw lastErr;
       const json = await res.json();
       const normalized = normalizeApiResponse(json);
-      setCards(normalized);
+      // a slower, older response must not overwrite a newer one that already landed
+      if (seq > appliedSeqRef.current) {
+        appliedSeqRef.current = seq;
+        feedAsUserRef.current = asUser;
+        setCards(normalized);
+        deriveAndSetVotesFromServer(normalized);
+      }
       console.log("[LP] fetched polls count:", normalized.length);
-      deriveAndSetVotesFromServer(normalized);
 
       // center initial poll if query param present
-      if (initialPollId) {
+      if (!silent && initialPollId) {
         const found = normalized.find(c => String(c.poll?.id ?? c._metaIndex) === String(initialPollId) || String(c._metaIndex) === String(initialPollId));
         if (!found) {
           const ok = await tryCenterWithRetries(initialPollId);
@@ -271,10 +342,18 @@ export default function LivePooling() {
           setTimeout(() => { tryCenterWithRetries(initialPollId); }, 140);
         }
       }
-    } catch (err) { console.error("fetchPolls:", err); setError(err.message || "Failed to load polls"); } finally { setLoading(false); }
+      return normalized;
+    } catch (err) {
+      console.error("fetchPolls:", err);
+      if (!silent) setError(err.message || "Failed to load polls");
+      return null;
+    } finally {
+      if (!silent) setLoading(false);
+    }
   }, [visitorId, initialPollId, region, deriveAndSetVotesFromServer, tryCenterWithRetries, showNotFound]);
 
-  useEffect(() => { if (visitorId) fetchPolls(); }, [visitorId, fetchPolls]);
+  useEffect(() => { fetchPollsRef.current = fetchPolls; }, [fetchPolls]);
+  useEffect(() => { if (visitorId && sessionReady) fetchPolls(); }, [visitorId, sessionReady, fetchPolls]);
 
   // Updates the region filter and keeps the URL shareable: picking LPU turns
   // the current page into a `?category=LPU` link, matching how a poll share
@@ -339,6 +418,14 @@ export default function LivePooling() {
       localStorage.setItem(LOCAL_CONTACT_KEY, JSON.stringify(userData));
     } catch (e) { }
 
+    // If the feed was read with a guest token it can't see this user's paid
+    // entries — re-read it now that there's a real session. (The pay /
+    // payment-check resumes below do their own refresh.)
+    const resumeRefreshes = pendingAction?.type === "PAY" || pendingAction?.type === "PAYMENT_CHECK";
+    if (!resumeRefreshes && !feedAsUserRef.current && cards.some(c => isPaidPoll(c.poll))) {
+      fetchPolls({ silent: true });
+    }
+
     // Resume pending action
     if (pendingAction) {
       if (pendingAction.type === "VOTE") {
@@ -347,15 +434,149 @@ export default function LivePooling() {
         setReasonModalOpen(true);
       } else if (pendingAction.type === "CREATE") {
         setCreateOpen(true);
+      } else if (pendingAction.type === "PAY") {
+        openPayFlow(pendingAction.payload.pollId);
+      } else if (pendingAction.type === "PAYMENT_CHECK") {
+        verifyPaymentReturn(pendingAction.payload.pollId);
       }
       setPendingAction(null);
     }
   };
 
-  const requestLogin = (action) => {
+  const requestLogin = useCallback((action) => {
     setPendingAction(action);
     setOtpModalOpen(true);
-  };
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // Paid polls: pay entry fee -> payment page -> back here -> vote
+  // ---------------------------------------------------------------------
+
+  const showNotice = useCallback((tone, text, ttlMs = 6000) => {
+    setNotice({ tone, text });
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = setTimeout(() => setNotice(null), ttlMs);
+  }, []);
+
+  // Opens the "pay ₹X to vote" confirm step (logging in first if needed).
+  // Nothing is charged here — the buyer has to confirm in the modal.
+  const openPayFlow = useCallback(async (pollId) => {
+    const id = String(pollId);
+    const token = await getUserToken();
+    if (!token) { requestLogin({ type: "PAY", payload: { pollId: id } }); return; }
+
+    // The feed may have been read as a guest (or they already paid on another
+    // device): re-read it with the real session before asking for money.
+    if (!feedAsUserRef.current) {
+      const list = await fetchPollsRef.current?.({ silent: true });
+      const poll = list?.find(c => String(c.poll?.id) === id)?.poll;
+      if (poll?.hasPaidEntry) {
+        showNotice("success", "You've already paid for this poll — pick your option.");
+        return;
+      }
+    }
+    setPayModal({ pollId: id, busy: false, error: "" });
+  }, [requestLogin, showNotice]);
+
+  // After the payment page returns here (`?paid=<pollId>`), keep re-reading
+  // the feed until the backend reports hasPaidEntry. The browser coming back
+  // proves nothing: only the payment webhook marks the entry paid.
+  const verifyPaymentReturn = useCallback(async (pollId) => {
+    const id = String(pollId);
+    if (verifyingRef.current) return;
+    if (!(await getUserToken())) {
+      showNotice("info", "Log in to confirm your payment.", 8000);
+      requestLogin({ type: "PAYMENT_CHECK", payload: { pollId: id } });
+      return;
+    }
+
+    verifyingRef.current = true;
+    setPaymentCheck({ pollId: id, status: "checking" });
+    const deadline = Date.now() + PAYMENT_CONFIRM_WINDOW_MS;
+    try {
+      while (mountedRef.current) {
+        const list = await fetchPollsRef.current?.({ silent: true });
+        const poll = list?.find(c => String(c.poll?.id) === id)?.poll;
+        if (poll?.hasPaidEntry) {
+          setPaymentCheck(null);
+          showNotice("success", "Payment received — you can now vote.");
+          return;
+        }
+        if (Date.now() >= deadline) break;
+        await new Promise(r => setTimeout(r, PAYMENT_CONFIRM_INTERVAL_MS));
+      }
+      if (mountedRef.current) setPaymentCheck({ pollId: id, status: "timeout" });
+    } finally {
+      verifyingRef.current = false;
+    }
+  }, [requestLogin, showNotice]);
+
+  // The buyer confirmed in the modal: create the payment link and leave for it.
+  const confirmPayment = useCallback(async () => {
+    if (!payModal || payModal.busy) return;
+    const { pollId } = payModal;
+    setPayModal({ pollId, busy: true, error: "" });
+
+    const result = await startPollEntry(pollId);
+    if (!mountedRef.current) return;
+
+    if (result.kind === "redirect") {
+      // leave the modal in its busy state while the browser navigates away
+      window.location.assign(result.paymentUrl);
+      return;
+    }
+    if (result.kind === "alreadyPaid") {
+      setPayModal(null);
+      await fetchPolls({ silent: true });
+      showNotice("success", "You've already paid for this poll — pick your option.");
+      return;
+    }
+    if (result.kind === "login") {
+      setPayModal(null);
+      requestLogin({ type: "PAY", payload: { pollId } });
+      return;
+    }
+    setPayModal({ pollId, busy: false, error: result.message });
+    // e.g. the poll closed meanwhile — make the card show it
+    fetchPolls({ silent: true });
+  }, [payModal, fetchPolls, requestLogin, showNotice]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    };
+  }, []);
+
+  // Back button from the payment page can restore this page from the
+  // back/forward cache with the modal still "opening payment…".
+  useEffect(() => {
+    const onPageShow = (e) => { if (e.persisted) setPayModal(null); };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
+
+  // Returned from the payment page: start confirming, and drop `?paid=` from
+  // the URL so a refresh doesn't replay it.
+  useEffect(() => {
+    if (!visitorId || !sessionReady || !returnedPaidPollId || paidReturnHandledRef.current) return;
+    paidReturnHandledRef.current = true;
+    // drop the payment page's query params so a refresh doesn't replay them
+    try {
+      const url = new URL(window.location.href);
+      ["paid", "amount", "payment_link_id", "signature", "payment_id", "payment_link_reference", "status"]
+        .forEach(k => url.searchParams.delete(k));
+      window.history.replaceState({}, "", url);
+    } catch { }
+    // `status` is only a hint (the backend webhook is the source of truth), but
+    // a clear failure means there's nothing to wait for.
+    if (returnedPaidStatus && returnedPaidStatus.toLowerCase() !== "succeeded") {
+      showNotice("info", "Your payment didn't go through, so you haven't been charged. You can try again.", 8000);
+      return;
+    }
+    verifyPaymentReturn(returnedPaidPollId);
+  }, [visitorId, sessionReady, returnedPaidPollId, returnedPaidStatus, verifyPaymentReturn, showNotice]);
 
   const submitVoteInternal = useCallback(async ({ pollId, optionId, previousOptionId = null, meta = null }) => {
     if (!visitorId) { setError("visitor id not ready"); console.warn("[LP] submitVoteInternal aborted - no visitorId"); return; }
@@ -383,7 +604,9 @@ export default function LivePooling() {
         if (previous && String(o.id) === String(previous)) return { ...o, count: Math.max(0, Number(o.count || 0) - 1) };
         return o;
       });
-      return { ...c, poll: { ...c.poll, options: newOptions } };
+      // paid polls: the target progress counts only paid users on the trigger option
+      const paidPatch = isPaidPoll(c.poll) ? { paidVotes: paidVotesAfterVote(c.poll, previous, optionId) } : {};
+      return { ...c, poll: { ...c.poll, options: newOptions, ...paidPatch } };
     }));
 
     setBusyMap(b => ({ ...b, [pollId]: true }));
@@ -427,10 +650,24 @@ export default function LivePooling() {
         throw new Error("Your session expired — please log in again to vote.");
       }
       if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        throw new Error(`vote failed ${res.status} ${txt}`);
+        const apiErr = await readApiError(res);
+        if (apiErr.code === ENTRY_FEE_REQUIRED) {
+          // Our view of this poll was stale: the server says this user hasn't
+          // paid. Refresh the card and open the pay step instead of showing an error.
+          fetchPolls({ silent: true });
+          openPayFlow(pollId);
+          const handled = new Error(apiErr.message || "Pay the entry fee to vote.");
+          handled.handled = true;
+          throw handled;
+        }
+        // e.g. the poll launched or closed while the page was open
+        if (isPaidPoll(card.poll)) fetchPolls({ silent: true });
+        throw new Error(apiErr.message || `vote failed ${res.status}`);
       }
       console.log("[LP] vote success for", pollId, optionId);
+      // paid polls: pick up the authoritative paidVotes — this vote may have
+      // just hit the target and launched the offer
+      if (isPaidPoll(card.poll)) fetchPolls({ silent: true });
     } catch (err) {
       console.error("[LP] vote error:", err);
       // rollback UI
@@ -442,7 +679,8 @@ export default function LivePooling() {
           if (previous && String(o.id) === String(previous)) return { ...o, count: Number(o.count || 0) + 1 };
           return o;
         });
-        return { ...c, poll: { ...c.poll, options: newOptions } };
+        const paidPatch = isPaidPoll(c.poll) ? { paidVotes: paidVotesAfterVote(c.poll, optionId, previous) } : {};
+        return { ...c, poll: { ...c.poll, options: newOptions, ...paidPatch } };
       }));
       setLocalVotes(prev => {
         const next = { ...(prev || {}) };
@@ -451,11 +689,11 @@ export default function LivePooling() {
         saveLocalVotes(visitorId, next);
         return next;
       });
-      setError(err.message || "Vote failed");
+      if (!err.handled) setError(err.message || "Vote failed");
     } finally {
       setBusyMap(b => ({ ...b, [pollId]: false }));
     }
-  }, [visitorId, cards, localVotes, busyMap, markLocal, saveLocalVotes, fetchPolls, requestLogin]);
+  }, [visitorId, cards, localVotes, busyMap, markLocal, saveLocalVotes, fetchPolls, requestLogin, openPayFlow]);
 
   // public wrapper: open contact modal only for first vote; otherwise submit directly
   const submitVote = useCallback(async ({ pollId, optionId, isNewOption = false, customText = null }) => {
@@ -466,6 +704,18 @@ export default function LivePooling() {
 
     if (busyMap[pollId]) {
       console.log("[LP] submitVote ignored - busy", pollId);
+      return;
+    }
+
+    // Paid polls gate voting on the entry fee, and freeze once launched/closed.
+    const paidStatus = getPaidStatus(card?.poll);
+    if (paidStatus === "launched") return; // the card already shows "Offer is live"
+    if (paidStatus === "closed") {
+      setError("This poll is closed and is no longer taking votes.");
+      return;
+    }
+    if (paidStatus === "needs-entry") {
+      openPayFlow(pollId);
       return;
     }
     if (String(previous) === String(optionId)) {
@@ -483,7 +733,7 @@ export default function LivePooling() {
     // Unified flow: ReasonModal handles login if needed
     setPendingVote({ pollId, optionId, previousOptionId: previous });
     setReasonModalOpen(true);
-  }, [cards, localVotes, user, busyMap]);
+  }, [cards, localVotes, user, busyMap, openPayFlow]);
 
   const handleReasonSubmit = async (reason, submittedUser) => {
     setReasonModalOpen(false);
@@ -548,6 +798,12 @@ export default function LivePooling() {
     setModalOpen(true);
   };
 
+  // paid polls: card callbacks + the poll shown in the confirm modal
+  const handlePay = ({ pollId }) => openPayFlow(pollId);
+  const handleRecheckPayment = ({ pollId }) => verifyPaymentReturn(pollId);
+  const paymentStatusFor = (c) => (paymentCheck && String(c.poll?.id) === String(paymentCheck.pollId) ? paymentCheck.status : null);
+  const payPoll = payModal ? cards.find(c => String(c.poll?.id) === String(payModal.pollId))?.poll ?? null : null;
+
   // ---------- WHEEL FORWARDING (ensures wheel works when cursor is in gaps) ----------
   const getScrollerDomFor = (scrollerRef, wrapperEl) => {
     // try common places to find the actual scroll container (adapt to your HorizontalScroller DOM)
@@ -593,17 +849,8 @@ export default function LivePooling() {
   return (
     <>
       {loading && (
-        <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[#fbfbfb]">
-          <div className="loading-screen-content flex flex-col items-center">
-            <div className="flex items-end gap-3 mb-6 h-[60px]">
-              <div className="vote-bar orange-gradient" style={{ animationDelay: "0ms" }}></div>
-              <div className="vote-bar orange-gradient" style={{ animationDelay: "200ms", height: "40px" }}></div>
-              <div className="vote-bar orange-gradient" style={{ animationDelay: "400ms", height: "50px" }}></div>
-              <div className="vote-bar orange-gradient" style={{ animationDelay: "600ms" }}></div>
-            </div>
-            <h2 className="text-3xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-orange-400 to-orange-600 mb-2">Picapool</h2>
-            <p className="text-gray-500 text-sm font-medium tracking-wide animate-pulse">Loading live polls...</p>
-          </div>
+        <div className="fixed inset-0 z-[100]">
+          <InteractiveLoader />
         </div>
       )}
       <div className={`container mx-auto px-4 md:px-8 mt-16 pb-28 transition-opacity duration-500 ${loading ? "opacity-0 h-0 overflow-hidden" : "opacity-100"}`}>
@@ -623,6 +870,25 @@ export default function LivePooling() {
         </div>
 
       {error && <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 p-3 rounded">{error}</div>}
+
+      {paymentCheck?.status === "checking" && (
+        <div role="status" className="mb-4 text-sm text-blue-700 bg-blue-50 border border-blue-100 p-3 rounded">
+          Confirming your payment… this usually takes a few seconds.
+        </div>
+      )}
+      {paymentCheck?.status === "timeout" && (
+        <div role="status" className="mb-4 text-sm text-amber-800 bg-amber-50 border border-amber-100 p-3 rounded">
+          Payment processing — check back shortly.
+        </div>
+      )}
+      {notice && (
+        <div
+          role="status"
+          className={`mb-4 text-sm p-3 rounded border ${notice.tone === "success" ? "text-green-700 bg-green-50 border-green-100" : "text-blue-700 bg-blue-50 border-blue-100"}`}
+        >
+          {notice.text}
+        </div>
+      )}
 
       {notFoundPopup.show && (
         <div style={{ position: "fixed", bottom: 18, right: 18, zIndex: 60, background: "#fff", border: "1px solid rgba(2,6,23,0.06)", padding: "12px 14px", borderRadius: 10, boxShadow: "0 10px 30px rgba(2,6,23,0.12)", fontSize: 14, fontWeight: 600 }}>
@@ -669,7 +935,7 @@ export default function LivePooling() {
                     <div id={`poll-${idFor}`} key={makeKey(c)} style={{ minWidth: 320, width: "min(760px, 100%)", flex: "0 0 min(760px, 100%)", paddingRight: 12, scrollSnapAlign: "center" }}>
                       <PollCard card={c} onVote={({ pollId, optionId }) => {
                         submitVote({ pollId, optionId });
-                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} />
+                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} onPay={handlePay} paymentStatus={paymentStatusFor(c)} onRecheckPayment={handleRecheckPayment} />
                     </div>
                   );
                 })}
@@ -714,7 +980,7 @@ export default function LivePooling() {
                     <div id={`poll-${idFor}`} key={makeKey(c)} style={{ minWidth: 320, width: "min(760px, 100%)", flex: "0 0 min(760px, 100%)", paddingRight: 12, scrollSnapAlign: "center" }}>
                       <PollCard card={c} onVote={({ pollId, optionId }) => {
                         submitVote({ pollId, optionId });
-                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} />
+                      }} onInteract={() => { }} votedMap={localVotes} busyMap={busyMap} region={region} onPay={handlePay} paymentStatus={paymentStatusFor(c)} onRecheckPayment={handleRecheckPayment} />
                     </div>
                   );
                 })}
@@ -780,6 +1046,18 @@ export default function LivePooling() {
         votedMap={localVotes}
         busyMap={busyMap}
         region={region}
+        onPay={handlePay}
+        paymentCheck={paymentCheck}
+        onRecheckPayment={handleRecheckPayment}
+      />
+
+      <PaidEntryModal
+        open={!!payModal}
+        poll={payPoll}
+        busy={!!payModal?.busy}
+        error={payModal?.error || ""}
+        onConfirm={confirmPayment}
+        onClose={() => setPayModal(null)}
       />
 
       {/* Global FAB — merges to the inline create button */}

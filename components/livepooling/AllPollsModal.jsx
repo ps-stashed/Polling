@@ -28,6 +28,9 @@ export default function AllPollsModal({
   votedMap = {},
   busyMap = {},
   region = "",
+  onPay,
+  paymentCheck = null, // { pollId, status } while a returning payment is being confirmed
+  onRecheckPayment,
 }) {
   // keep hooks order stable
   useEffect(() => {
@@ -121,6 +124,9 @@ export default function AllPollsModal({
                         busyMap={busyMap}
                         width={increasedCardWidth}
                         region={region}
+                        onPay={onPay}
+                        paymentStatus={paymentCheck && String(paymentCheck.pollId) === String(c.poll?.id) ? paymentCheck.status : null}
+                        onRecheckPayment={onRecheckPayment}
                       />
                     </div>
                   </div>
