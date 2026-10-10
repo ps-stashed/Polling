@@ -72,7 +72,7 @@ export default function OtpLoginModal({
             const token = await getPicapoolToken(visitorId);
             let turnstileToken = "";
             try {
-                turnstileToken = await getTurnstileToken();
+                turnstileToken = await getTurnstileToken("otp-request");
             } catch (e) {
                 console.warn("[LP] turnstile token unavailable for otp request", e);
             }
@@ -112,19 +112,12 @@ export default function OtpLoginModal({
         setLoading(true);
         try {
             const token = await getPicapoolToken(visitorId);
-            let turnstileToken = "";
-            try {
-                turnstileToken = await getTurnstileToken();
-            } catch (e) {
-                console.warn("[LP] turnstile token unavailable for otp verify", e);
-            }
             const res = await fetch(`${PICAPOOL_API_BASE}/v1/auth/otp/verify`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
                     Accept: "application/json",
                     ...(token ? { Authorization: token } : {}),
-                    ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
                 },
                 body: JSON.stringify({
                     code: otp,
@@ -172,7 +165,7 @@ export default function OtpLoginModal({
             const token = await getPicapoolToken(visitorId);
             let turnstileToken = "";
             try {
-                turnstileToken = await getTurnstileToken();
+                turnstileToken = await getTurnstileToken("otp-resend");
             } catch (e) {
                 console.warn("[LP] turnstile token unavailable for otp resend", e);
             }

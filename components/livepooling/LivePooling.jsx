@@ -14,7 +14,6 @@ import InteractiveLoader from "./InteractiveLoader";
 import PaidEntryModal from "./PaidEntryModal";
 import useVisitorId from "@/hooks/useVisitorId"; // adjust path if needed
 import { getPicapoolToken, getUserToken, clearUserToken, hasStoredUserSession, importAppSession, PICAPOOL_API_BASE } from "@/lib/picapoolAuth";
-import { getTurnstileToken } from "@/lib/turnstile";
 import {
   ENTRY_FEE_REQUIRED,
   getPaidStatus,
@@ -628,19 +627,12 @@ export default function LivePooling() {
         requestLogin({ type: "VOTE", payload: { pollId, optionId, previousOptionId: previous } });
         throw new Error("Please log in to vote.");
       }
-      let turnstileToken = "";
-      try {
-        turnstileToken = await getTurnstileToken();
-      } catch (e) {
-        console.warn("[LP] turnstile token unavailable for vote", e);
-      }
       const res = await fetch(REGISTER_VOTE_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "Accept": "*/*",
           Authorization: `Bearer ${token}`,
-          ...(turnstileToken ? { "X-Turnstile-Token": turnstileToken } : {}),
         },
         body: JSON.stringify(payload),
       });
